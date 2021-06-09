@@ -791,6 +791,116 @@ func TestReconcile(t *testing.T) {
 		expectedClientActions:  2,
 		maxEndpointsPerSubset:  2,
 		expectedMetrics:        &expectedMetrics{desiredSlices: 2, actualSlices: 2, desiredEndpoints: 4, addedPerSync: 4, updatedPerSync: 0, removedPerSync: 0, skippedPerSync: 1, numCreated: 2, numUpdated: 0},
+	}, {
+		testName: "Annotation mirroring for endpoints with 2 subsets, multiple ports and addresses, existing EndpointSlice identical to subset",
+		subsets: []corev1.EndpointSubset{{
+			Ports: []corev1.EndpointPort{{
+				Name:     "http",
+				Port:     80,
+				Protocol: corev1.ProtocolTCP,
+			}, {
+				Name:     "https",
+				Port:     443,
+				Protocol: corev1.ProtocolUDP,
+			}},
+			Addresses: []corev1.EndpointAddress{{
+				IP:       "10.0.0.1",
+				Hostname: "pod-1",
+				NodeName: utilpointer.StringPtr("node-1"),
+			}, {
+				IP:       "10.0.0.2",
+				Hostname: "pod-2",
+				NodeName: utilpointer.StringPtr("node-2"),
+			}},
+		}, {
+			Ports: []corev1.EndpointPort{{
+				Name:     "http",
+				Port:     3000,
+				Protocol: corev1.ProtocolTCP,
+			}, {
+				Name:     "https",
+				Port:     3001,
+				Protocol: corev1.ProtocolUDP,
+			}},
+			Addresses: []corev1.EndpointAddress{{
+				IP:       "10.0.1.1",
+				Hostname: "pod-11",
+				NodeName: utilpointer.StringPtr("node-1"),
+			}, {
+				IP:       "10.0.1.2",
+				Hostname: "pod-12",
+				NodeName: utilpointer.StringPtr("node-2"),
+			}, {
+				IP:       "10.0.1.3",
+				Hostname: "pod-13",
+				NodeName: utilpointer.StringPtr("node-3"),
+			}},
+		}},
+		existingEndpointSlices: []*discovery.EndpointSlice{{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "test-ep-1",
+				Annotations: map[string]string{
+					corev1.LastAppliedConfigAnnotation: "{\"apiVersion\":\"v1\",\"kind\":\"Endpoints\",\"metadata\":{\"annotations\":{},\"name\":\"ep-test\",\"namespace\":\"default\"},\"subsets\":[{\"addresses\":[{\"ip\":\"193.99.144.80\"}],\"notReadyAddresses\":[{\"ip\":\"195.54.164.39\"}],\"ports\":[{\"name\":\"http\",\"port\":80,\"protocol\":\"TCP\"},{\"name\":\"https\",\"port\":443,\"protocol\":\"TCP\"}]}]}",
+				},
+			},
+			AddressType: discovery.AddressTypeIPv4,
+			Ports: []discovery.EndpointPort{{
+				Name:     utilpointer.StringPtr("http"),
+				Port:     utilpointer.Int32Ptr(80),
+				Protocol: &protoTCP,
+			}, {
+				Name:     utilpointer.StringPtr("https"),
+				Port:     utilpointer.Int32Ptr(443),
+				Protocol: &protoUDP,
+			}},
+			Endpoints: []discovery.Endpoint{{
+				Addresses:  []string{"10.0.0.1"},
+				Hostname:   utilpointer.StringPtr("pod-1"),
+				NodeName:   utilpointer.StringPtr("node-1"),
+				Conditions: discovery.EndpointConditions{Ready: utilpointer.BoolPtr(true)},
+			}, {
+				Addresses:  []string{"10.0.0.2"},
+				Hostname:   utilpointer.StringPtr("pod-2"),
+				NodeName:   utilpointer.StringPtr("node-2"),
+				Conditions: discovery.EndpointConditions{Ready: utilpointer.BoolPtr(true)},
+			}},
+		}},
+		expectedNumSlices:     2,
+		expectedClientActions: 2,
+		expectedMetrics:       &expectedMetrics{desiredSlices: 2, actualSlices: 2, desiredEndpoints: 5, addedPerSync: 3, numCreated: 1, numUpdated: 1},
+	}, {
+		testName: "Annotation mirroring for endpoints with 1 subset, port, and address and existing slice with an additional annotation",
+		subsets: []corev1.EndpointSubset{{
+			Ports: []corev1.EndpointPort{{
+				Name:     "http",
+				Port:     80,
+				Protocol: corev1.ProtocolTCP,
+			}},
+			Addresses: []corev1.EndpointAddress{{
+				IP:       "10.0.0.1",
+				Hostname: "pod-1",
+			}},
+		}},
+		existingEndpointSlices: []*discovery.EndpointSlice{{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "test-ep-1",
+				Annotations: map[string]string{"foo": "bar", corev1.LastAppliedConfigAnnotation: "{}"},
+			},
+			AddressType: discovery.AddressTypeIPv4,
+			Ports: []discovery.EndpointPort{{
+				Name:     utilpointer.StringPtr("http"),
+				Port:     utilpointer.Int32Ptr(80),
+				Protocol: &protoTCP,
+			}},
+			Endpoints: []discovery.Endpoint{{
+				Addresses:  []string{"10.0.0.1"},
+				Hostname:   utilpointer.StringPtr("pod-1"),
+				Conditions: discovery.EndpointConditions{Ready: utilpointer.BoolPtr(true)},
+			}},
+		}},
+		expectedNumSlices:     1,
+		expectedClientActions: 1,
+		expectedMetrics:       &expectedMetrics{numUpdated: 1, desiredEndpoints: 1, desiredSlices: 1, actualSlices: 1},
 	}}
 
 	for _, tc := range testCases {
@@ -836,6 +946,8 @@ func TestReconcile(t *testing.T) {
 			if tc.expectedMetrics != nil {
 				expectMetrics(t, *tc.expectedMetrics)
 			}
+
+			expectAnnotations(t, endpoints, tc.existingEndpointSlices)
 
 			endpointSlices := fetchEndpointSlices(t, client, namespace)
 			expectEndpointSlices(t, tc.expectedNumSlices, int(maxEndpointsPerSubset), endpoints, endpointSlices)
@@ -908,6 +1020,15 @@ func expectEndpointSlices(t *testing.T, num, maxEndpointsPerSubset int, endpoint
 
 		expectMatchingAddresses(t, epSubset, matchingEndpointsV4, discovery.AddressTypeIPv4, maxEndpointsPerSubset)
 		expectMatchingAddresses(t, epSubset, matchingEndpointsV6, discovery.AddressTypeIPv6, maxEndpointsPerSubset)
+	}
+}
+
+func expectAnnotations(t *testing.T, ep corev1.Endpoints, existingEndpointSlices []*discovery.EndpointSlice) {
+	for _, epSlice := range existingEndpointSlices {
+		if epSlice.Annotations[corev1.LastAppliedConfigAnnotation] != "" &&
+			ep.Annotations[corev1.LastAppliedConfigAnnotation] == epSlice.Annotations[corev1.LastAppliedConfigAnnotation] {
+			t.Errorf("Expected LastAppliedConfigAnnotation to not have been mirrored from value: %s", epSlice.Annotations[corev1.LastAppliedConfigAnnotation])
+		}
 	}
 }
 
